@@ -1,0 +1,52 @@
+# Active Visual Search with DINOv3 + RL
+# Optimized for RTX 4090 (Windows)
+
+# Core Deep Learning
+torch>=2.0.0              # PyTorch with CUDA support
+torchvision>=0.15.0       # Image transformations and datasets
+torchaudio>=2.0.0         # Audio processing (required by torch)
+
+# Computer Vision
+opencv-python>=4.8.0      # Image processing and visualization
+pillow>=10.0.0            # Image loading
+imageio>=2.31.0           # GIF creation for demos
+imageio-ffmpeg>=0.4.9     # Video encoding
+
+# Reinforcement Learning
+gym>=0.26.0               # RL environment framework (legacy)
+gymnasium>=0.29.0         # Modern Gym replacement
+stable-baselines3>=2.1.0  # High-quality RL implementations (optional)
+
+# Scientific Computing
+numpy>=1.24.0             # Numerical operations
+scipy>=1.11.0             # Scientific algorithms
+matplotlib>=3.7.0         # Plotting
+seaborn>=0.12.0           # Statistical visualization
+pandas>=2.0.0             # Data analysis
+
+# Configuration
+pyyaml>=6.0               # YAML config files
+omegaconf>=2.3.0          # Hierarchical configuration
+
+# Logging and Monitoring
+tensorboard>=2.13.0       # Training visualization
+tqdm>=4.65.0              # Progress bars
+wandb>=0.15.0             # Weights & Biases (optional, cloud logging)
+
+# Jupyter and Interactive
+jupyter>=1.0.0            # Jupyter notebook
+ipywidgets>=8.0.0         # Interactive widgets
+notebook>=7.0.0           # Jupyter notebook interface
+
+# Utilities
+einops>=0.6.1             # Tensor operations
+timm>=0.9.0               # PyTorch image models (for DINOv3 support)
+
+# Development Tools (optional)
+pytest>=7.4.0             # Unit testing
+black>=23.7.0             # Code formatting
+isort>=5.12.0             # Import sorting
+flake8>=6.1.0             # Linting
+
+# Note: DINOv3 is loaded via torch.hub, no separate install needed
+# torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
