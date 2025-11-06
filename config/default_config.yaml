@@ -1,0 +1,123 @@
+# Active Visual Search - Default Configuration
+# Optimized for RTX 4090 and fast iteration
+
+# Experiment
+experiment:
+  name: "active_visual_search_mvp"
+  seed: 42
+  device: "cuda"  # Use "cpu" if no GPU available
+
+# Environment Configuration
+environment:
+  canvas_size: [512, 512]       # Search space dimensions (height, width)
+  window_size: [64, 64]         # Agent viewport size
+  step_size: 32                 # Movement step in pixels (50% overlap)
+  max_steps: 50                 # Maximum steps per episode
+  num_objects: 7                # Number of CIFAR images on canvas
+  min_object_distance: 80       # Minimum distance between objects (pixels)
+
+  # Reward structure
+  reward_found_correct: 10.0
+  reward_found_wrong: -5.0
+  reward_step: -0.1
+  reward_out_of_bounds: -1.0
+  reward_timeout: -2.0
+
+# DINOv3 Model
+dinov3:
+  variant: "dinov2_vits14"      # Options: vits14 (384d), vitb14 (768d), vitl14 (1024d)
+  freeze: true                   # Freeze encoder for MVP (no fine-tuning)
+  use_fp16: true                 # Half precision for 2x speed on RTX 4090
+  cache_features: true           # Cache target class embeddings
+
+# DQN Agent
+agent:
+  architecture: "dqn"            # Options: dqn, ddqn, dueling_dqn
+
+  # Network architecture
+  feature_dim: 384               # DINOv3-ViT-S output dimension
+  hidden_dims: [512, 256]        # MLP hidden layers
+  dropout: 0.2                   # Dropout rate
+
+  # Training hyperparameters
+  learning_rate: 0.0001
+  gamma: 0.95                    # Discount factor
+
+  # Exploration
+  epsilon_start: 1.0
+  epsilon_end: 0.1
+  epsilon_decay: 0.995           # Multiplicative decay per episode
+
+  # Experience replay
+  replay_buffer_size: 10000
+  batch_size: 32
+  min_replay_size: 500           # Start training after this many experiences
+
+  # Target network
+  target_update_freq: 100        # Steps between target network updates
+  tau: 0.005                     # Soft update coefficient (if using soft update)
+  use_soft_update: false         # Use soft update instead of hard copy
+
+# Training
+training:
+  num_episodes: 1000             # Total training episodes
+  eval_frequency: 50             # Evaluate every N episodes
+  save_frequency: 100            # Save checkpoint every N episodes
+
+  # Curriculum learning (optional, for future)
+  use_curriculum: false
+  curriculum_stages:
+    - {max_objects: 3, episodes: 200}
+    - {max_objects: 5, episodes: 300}
+    - {max_objects: 7, episodes: 500}
+
+# Evaluation
+evaluation:
+  num_episodes: 100              # Number of test episodes
+  render: true                   # Render during evaluation
+  save_videos: true              # Save episode videos
+  max_videos: 10                 # Maximum number of videos to save
+
+# Dataset
+dataset:
+  name: "CIFAR10"
+  data_dir: "./data"             # Download location
+  train_split: 0.8               # 80% train, 20% val
+
+  # Target classes (CIFAR-10 indices)
+  target_classes: [0, 1, 2, 3, 4]  # airplane, automobile, bird, cat, deer
+  # Full CIFAR-10: [0-9] = airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck
+
+  # Data augmentation (for canvas background, optional)
+  use_augmentation: false
+  augmentation:
+    random_flip: false
+    random_rotation: false
+    color_jitter: false
+
+# Logging
+logging:
+  log_dir: "experiments/logs"
+  checkpoint_dir: "checkpoints"
+  tensorboard: true
+  wandb: false                   # Set true if using Weights & Biases
+  wandb_project: "active-visual-search"
+
+  # What to log
+  log_frequency: 10              # Log every N episodes
+  log_gradients: false           # Log gradient statistics (expensive)
+  log_images: true               # Log example episodes as images
+
+# Visualization
+visualization:
+  show_attention: true           # Show DINOv3 attention maps
+  show_trajectory: true          # Show agent search path
+  show_heatmap: true             # Show search heatmap
+  fps: 10                        # Frames per second for saved videos
+
+# Performance Optimization
+optimization:
+  num_workers: 4                 # DataLoader workers (for parallel env in future)
+  pin_memory: true               # Pin memory for faster GPU transfer
+  compile_model: false           # Use torch.compile() (PyTorch 2.0+, experimental)
+  cudnn_benchmark: true          # cuDNN auto-tuner
