@@ -379,14 +379,7 @@ def setup_scene_cuda():
 class CUDARaytracingApp:
     """CUDA GPU-accelerated raytracing application"""
     def __init__(self, width=800, height=600):
-        # Check CUDA availability
-        if not cuda.is_available():
-            print("ERROR: CUDA is not available!")
-            print("Please install CUDA toolkit and ensure GPU drivers are up to date.")
-            sys.exit(1)
-
-        print(f"CUDA Device: {cuda.get_current_device().name.decode()}")
-
+        # CUDA is already initialized in main(), just proceed
         pygame.init()
         self.width = width
         self.height = height
@@ -403,28 +396,33 @@ class CUDARaytracingApp:
          self.planes, self.plane_normals, self.plane_colors, self.plane_refl) = setup_scene_cuda()
 
         # Copy to GPU
-        self.d_spheres = cuda.to_device(self.spheres)
-        self.d_sphere_colors = cuda.to_device(self.sphere_colors)
-        self.d_sphere_refl = cuda.to_device(self.sphere_refl)
-        self.d_planes = cuda.to_device(self.planes)
-        self.d_plane_normals = cuda.to_device(self.plane_normals)
-        self.d_plane_colors = cuda.to_device(self.plane_colors)
-        self.d_plane_refl = cuda.to_device(self.plane_refl)
+        try:
+            self.d_spheres = cuda.to_device(self.spheres)
+            self.d_sphere_colors = cuda.to_device(self.sphere_colors)
+            self.d_sphere_refl = cuda.to_device(self.sphere_refl)
+            self.d_planes = cuda.to_device(self.planes)
+            self.d_plane_normals = cuda.to_device(self.plane_normals)
+            self.d_plane_colors = cuda.to_device(self.plane_colors)
+            self.d_plane_refl = cuda.to_device(self.plane_refl)
 
-        # Light and background
-        self.light_dir = np.array([0.3, 1.0, 0.3], dtype=np.float32)
-        self.light_dir /= np.linalg.norm(self.light_dir)
-        self.d_light_dir = cuda.to_device(self.light_dir)
+            # Light and background
+            self.light_dir = np.array([0.3, 1.0, 0.3], dtype=np.float32)
+            self.light_dir /= np.linalg.norm(self.light_dir)
+            self.d_light_dir = cuda.to_device(self.light_dir)
 
-        self.bg_color = np.array([0.1, 0.1, 0.15], dtype=np.float32)
-        self.d_bg_color = cuda.to_device(self.bg_color)
+            self.bg_color = np.array([0.1, 0.1, 0.15], dtype=np.float32)
+            self.d_bg_color = cuda.to_device(self.bg_color)
+
+            # Output buffer
+            self.output = np.zeros((height, width, 3), dtype=np.float32)
+            self.d_output = cuda.device_array((height, width, 3), dtype=np.float32)
+        except Exception as e:
+            print(f"ERROR: Failed to copy data to GPU: {e}")
+            print("GPU may be out of memory or drivers may need update.")
+            sys.exit(1)
 
         # Rendering parameters
         self.max_depth = 3  # More reflections with GPU!
-
-        # Output buffer
-        self.output = np.zeros((height, width, 3), dtype=np.float32)
-        self.d_output = cuda.device_array((height, width, 3), dtype=np.float32)
 
         # CUDA grid configuration
         threadsperblock = (16, 16)
@@ -562,9 +560,47 @@ def main():
     print("CUDA GPU Raytracing - RTX 4090 Accelerated")
     print("=" * 60)
 
+    # Early CUDA check
+    try:
+        if not cuda.is_available():
+            print("\nERROR: CUDA is not available!")
+            print("\nPlease check:")
+            print("1. NVIDIA GPU is installed and working")
+            print("2. CUDA drivers are installed")
+            print("3. Run 'nvidia-smi' to verify GPU status")
+            print("\nAlternative: Use CPU version instead:")
+            print("  python raytracing_fast.py")
+            sys.exit(1)
+
+        # Test CUDA initialization
+        print("Initializing CUDA...")
+        cuda.select_device(0)
+        print(f"✓ CUDA initialized successfully")
+        print(f"✓ GPU: {cuda.get_current_device().name.decode()}")
+
+    except Exception as e:
+        print(f"\nERROR: CUDA initialization failed: {e}")
+        print("\nTroubleshooting:")
+        print("1. Update NVIDIA drivers to latest version")
+        print("2. Reinstall CUDA toolkit")
+        print("3. Restart your computer")
+        print("4. Try running as administrator (Windows)")
+        print("\nAlternative: Use CPU version instead:")
+        print("  python raytracing_fast.py")
+        sys.exit(1)
+
     # Start with 800x600, can be increased if performance is good
-    app = CUDARaytracingApp(width=800, height=600)
-    app.run()
+    try:
+        app = CUDARaytracingApp(width=800, height=600)
+        app.run()
+    except KeyboardInterrupt:
+        print("\n\nExiting...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n\nERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
