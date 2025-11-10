@@ -358,7 +358,10 @@ class CuPyRaytracingApp:
         # Test CuPy
         try:
             test = cp.array([1, 2, 3])
-            print(f"✓ CuPy GPU available: {cp.cuda.Device().name}")
+            device_id = cp.cuda.Device().id
+            props = cp.cuda.runtime.getDeviceProperties(device_id)
+            device_name = props['name'].decode('utf-8')
+            print(f"✓ CuPy GPU available: {device_name}")
         except Exception as e:
             print(f"ERROR: CuPy GPU test failed: {e}")
             sys.exit(1)
@@ -518,7 +521,7 @@ class CuPyRaytracingApp:
         for text in texts:
             rendered = font.render(text, True, (0, 255, 0))
             self.screen.blit(rendered, (10, y_offset))
-            y_offset = 25
+            y_offset += 25
 
         pygame.display.flip()
         self.need_render = False
