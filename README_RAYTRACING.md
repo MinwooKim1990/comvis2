@@ -16,7 +16,7 @@
 numpy>=1.21.0
 pygame>=2.0.0
 numba>=0.56.0
-# For CUDA version: CUDA Toolkit 11.0+ and NVIDIA GPU drivers
+cupy-cuda12x>=13.0.0  # RTX 4090용 (CUDA 12.x)
 ```
 
 ## 🚀 실행 방법
@@ -24,19 +24,34 @@ numba>=0.56.0
 ### 1. 의존성 설치
 
 ```bash
-pip install -r requirements_raytracing.txt
+# 기본 패키지
+pip install numpy pygame numba
+
+# GPU 사용 시 (RTX 4090 권장)
+pip install cupy-cuda12x  # CUDA 12.x용
+# 또는
+pip install cupy-cuda11x  # CUDA 11.x용
 ```
 
 ### 2. 시뮬레이션 실행
 
-**⚡ GPU 버전 (최고 성능!) - RTX 4090 CUDA:**
+**⚡ GPU 버전 (최고 성능!) - CuPy + RTX 4090:**
+```bash
+python raytracing_cupy.py
+```
+- ✅ **Windows/Ubuntu 모두 작동 확인!**
+- ✅ RTX 4090 + CUDA 12.x 완벽 호환
+- 800x600 실시간 60+ FPS
+- 고해상도 가능 (1920x1080도 원활)
+- Numba보다 안정적!
+
+**⚠️ GPU 버전 (Numba CUDA) - RTX 4090 호환 이슈:**
 ```bash
 python raytracing_cuda.py
 ```
-- RTX 4090의 16,384개 CUDA 코어 모두 활용
-- 800x600 실시간 60+ FPS
-- 고해상도 가능 (1920x1080도 원활)
-- 최대 5회 반사 지원
+- ❌ RTX 4090 + CUDA 12.x에서 access violation 에러
+- Numba가 CUDA 12.x를 완전히 지원하지 않음
+- **CuPy 버전 사용 권장!**
 
 **🚀 고속 버전 - Numba JIT (CPU):**
 ```bash
@@ -51,7 +66,9 @@ python raytracing_fast.py
 python raytracing_simulation.py
 ```
 
-> **RTX 4090 있으면**: `raytracing_cuda.py` 사용! **100-1000배 빠름** 🔥
+> **✅ RTX 4090 있으면**: `raytracing_cupy.py` 사용! **100-1000배 빠름** 🔥
+>
+> **🛠️ CUDA 문제 진단**: `python check_cuda.py` 실행
 
 ## 🎮 조작법
 
