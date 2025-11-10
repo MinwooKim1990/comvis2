@@ -189,16 +189,26 @@ void raytrace_kernel(
         float hit_pz = oz + closest_t * dz;
 
         // Lighting
-        float diffuse = fmaxf(0.0f, hit_nx * light_dir[0] +
-                                     hit_ny * light_dir[1] +
-                                     hit_nz * light_dir[2]);
-        float ambient = 0.3f;
-        float lighting = ambient + (1.0f - ambient) * diffuse;
+        float lit_r, lit_g, lit_b;
 
-        // Accumulate color
-        float lit_r = hit_r * lighting;
-        float lit_g = hit_g * lighting;
-        float lit_b = hit_b * lighting;
+        // Check if emissive (color > 1.0)
+        if (hit_r > 1.0f || hit_g > 1.0f || hit_b > 1.0f) {
+            // Emissive object - no lighting needed
+            lit_r = hit_r;
+            lit_g = hit_g;
+            lit_b = hit_b;
+        } else {
+            // Normal lighting
+            float diffuse = fmaxf(0.0f, hit_nx * light_dir[0] +
+                                         hit_ny * light_dir[1] +
+                                         hit_nz * light_dir[2]);
+            float ambient = 0.3f;
+            float lighting = ambient + (1.0f - ambient) * diffuse;
+
+            lit_r = hit_r * lighting;
+            lit_g = hit_g * lighting;
+            lit_b = hit_b * lighting;
+        }
 
         float contribution = reflectivity * (1.0f - hit_refl);
         accum_r += contribution * lit_r;
@@ -224,10 +234,15 @@ void raytrace_kernel(
         }
     }
 
-    // Clamp color
-    accum_r = fminf(1.0f, fmaxf(0.0f, accum_r));
-    accum_g = fminf(1.0f, fmaxf(0.0f, accum_g));
-    accum_b = fminf(1.0f, fmaxf(0.0f, accum_b));
+    // Clamp color (allow > 1.0 for bloom/HDR effect)
+    accum_r = fminf(3.0f, fmaxf(0.0f, accum_r));
+    accum_g = fminf(3.0f, fmaxf(0.0f, accum_g));
+    accum_b = fminf(3.0f, fmaxf(0.0f, accum_b));
+
+    // Simple tone mapping for HDR
+    accum_r = accum_r / (1.0f + accum_r);
+    accum_g = accum_g / (1.0f + accum_g);
+    accum_b = accum_b / (1.0f + accum_b);
 
     // Write output
     int idx = y * width + x;
@@ -290,49 +305,60 @@ class Camera:
 # ============================================================================
 
 def setup_scene():
-    """Setup scene geometry"""
-    # Spheres: [cx, cy, cz, radius]
-    spheres = [[0.0, 0.0, 0.0, 1.5]]  # Center sphere
-    sphere_colors = [[1.0, 0.3, 0.3]]
-    sphere_refl = [0.3]
+    """Setup scene geometry - returns base scene (will be animated)"""
+    # Initial sphere positions (will be updated each frame)
+    spheres = []
+    sphere_colors = []
+    sphere_refl = []
 
-    # Colorful spheres
+    # Center emissive sphere (glowing)
+    spheres.append([0.0, 0.5, -2.0, 0.8])
+    sphere_colors.append([10.0, 5.0, 2.0])  # Bright emission!
+    sphere_refl.append(0.1)
+
+    # Orbiting colorful spheres
     colors = [
-        [1.0, 0.5, 0.0],  # Orange
-        [1.0, 1.0, 0.0],  # Yellow
-        [0.0, 1.0, 0.5],  # Cyan
-        [0.3, 0.3, 1.0],  # Blue
-        [1.0, 0.0, 1.0],  # Magenta
+        [1.0, 0.1, 0.1],  # Red
+        [0.1, 1.0, 0.1],  # Green
+        [0.1, 0.1, 1.0],  # Blue
+        [1.0, 1.0, 0.1],  # Yellow
+        [1.0, 0.1, 1.0],  # Magenta
+        [0.1, 1.0, 1.0],  # Cyan
     ]
 
     for i, color in enumerate(colors):
         angle = (i / len(colors)) * 2 * np.pi
-        x = np.cos(angle) * 1.2
-        z = np.sin(angle) * 1.2
-        spheres.append([x, 0.0, z, 0.5])
+        x = np.cos(angle) * 2.5
+        z = np.sin(angle) * 2.5 - 2.0
+        spheres.append([x, 0.3, z, 0.4])
         sphere_colors.append(color)
-        sphere_refl.append(0.2)
+        sphere_refl.append(0.7)  # Shiny!
+
+    # Glass-like sphere
+    spheres.append([0.0, 0.3, -4.5, 0.6])
+    sphere_colors.append([0.9, 0.9, 1.0])
+    sphere_refl.append(0.95)  # Very reflective
 
     # Planes
     planes = [
-        [-5.0, 0.0, 0.0],  # Left mirror
-        [5.0, 0.0, 0.0],   # Right mirror
-        [0.0, -2.0, 0.0],  # Floor
+        [-4.0, 0.0, -2.0],  # Left mirror
+        [4.0, 0.0, -2.0],   # Right mirror
+        [0.0, -0.5, 0.0],   # Floor (water-like)
     ]
 
     plane_normals = [
-        [0.7071, 0.0, 0.7071],
-        [-0.7071, 0.0, 0.7071],
-        [0.0, 1.0, 0.0],
+        [0.7071, 0.0, 0.7071],   # Left diagonal
+        [-0.7071, 0.0, 0.7071],  # Right diagonal
+        [0.0, 1.0, 0.0],         # Up
     ]
 
     plane_colors = [
-        [0.9, 0.9, 0.95],
-        [0.95, 0.9, 0.9],
-        [0.3, 0.3, 0.3],
+        [0.95, 0.9, 0.95],  # Left mirror (slightly pink)
+        [0.9, 0.95, 0.95],  # Right mirror (slightly cyan)
+        [0.1, 0.1, 0.15],   # Floor (dark, water-like)
     ]
 
-    plane_refl = [0.95, 0.95, 0.1]
+    plane_refl = [0.98, 0.98, 0.85]  # Mirrors + water-like floor
 
     return (
         np.array(spheres, dtype=np.float32).flatten(),
@@ -373,19 +399,25 @@ class CuPyRaytracingApp:
         pygame.display.set_caption("CuPy GPU Raytracing - RTX 4090")
         self.clock = pygame.time.Clock()
 
-        # Camera
-        self.camera = Camera([0, 2, 8], [0, 0, 0])
+        # Camera - positioned to see reflections clearly
+        self.camera = Camera([0, 1.5, 2.0], [0, 0.5, -2.0])
+
+        # Animation time
+        self.time = 0.0
 
         # Scene
         print("Setting up scene...")
         (spheres, sphere_colors, sphere_refl, num_spheres,
          planes, plane_normals, plane_colors, plane_refl, num_planes) = setup_scene()
 
+        # Save base scene for animation
+        self.base_spheres = spheres.copy()
+        self.num_spheres = num_spheres
+
         # Upload to GPU
         self.d_spheres = cp.asarray(spheres)
         self.d_sphere_colors = cp.asarray(sphere_colors)
         self.d_sphere_refl = cp.asarray(sphere_refl)
-        self.num_spheres = num_spheres
 
         self.d_planes = cp.asarray(planes)
         self.d_plane_normals = cp.asarray(plane_normals)
@@ -473,6 +505,38 @@ class CuPyRaytracingApp:
         if moved:
             self.need_render = True
 
+    def update_scene(self):
+        """Update scene animation"""
+        # Update spheres based on time
+        spheres = self.base_spheres.copy()
+
+        # Animate orbiting spheres (indices 1-6)
+        for i in range(1, 7):
+            idx = i * 4
+            angle_offset = (i - 1) / 6.0 * 2 * np.pi
+            angle = self.time * 0.5 + angle_offset
+
+            # Orbit motion
+            radius = 2.5
+            x = np.cos(angle) * radius
+            z = np.sin(angle) * radius - 2.0
+
+            # Bobbing motion
+            y = 0.3 + np.sin(self.time * 2.0 + angle_offset) * 0.2
+
+            spheres[idx] = x
+            spheres[idx + 1] = y
+            spheres[idx + 2] = z
+
+        # Animate center emissive sphere (index 0)
+        spheres[1] = 0.5 + np.sin(self.time * 1.5) * 0.3  # Y bobbing
+
+        # Upload updated spheres to GPU
+        self.d_spheres = cp.asarray(spheres)
+
+        # Increment time
+        self.time += 0.016  # ~60 FPS
+
     def render(self):
         """Render using CuPy"""
         aspect_ratio = self.width / self.height
@@ -511,10 +575,14 @@ class CuPyRaytracingApp:
         fps = self.clock.get_fps()
         texts = [
             f"FPS: {fps:.1f}",
-            "CuPy GPU Raytracing",
-            "RTX 4090",
-            "WASD: Move | Mouse: Look",
-            "ESC: Quit"
+            "CuPy GPU Raytracing - RTX 4090",
+            "",
+            "Watch the reflections!",
+            "- Glowing sphere in center",
+            "- Mirrors on left/right",
+            "- Water-like floor",
+            "",
+            "WASD: Move | Mouse: Look | ESC: Quit"
         ]
 
         y_offset = 10
@@ -537,8 +605,11 @@ class CuPyRaytracingApp:
             self.handle_events()
             self.handle_movement()
 
-            if self.need_render:
-                self.render()
+            # Always update scene for animation
+            self.update_scene()
+
+            # Always render (animated scene)
+            self.render()
 
             self.clock.tick(60)
 
