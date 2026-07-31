@@ -1,138 +1,284 @@
 #!/usr/bin/env python3
 """
-Interactive Raytracing Simulation with Mirrors
-Features:
-- Colorful sphere in the center
-- Diagonal mirrors on left and right
-- Interactive camera controls (WASD + mouse)
-- Real-time raytracing with reflections
+CuPy GPU-Accelerated Raytracing Simulation
+Works on RTX 4090 with CUDA 12.x
+Much more stable than Numba CUDA!
 """
 
 import numpy as np
 import pygame
-from dataclasses import dataclass
-from typing import Optional, Tuple
 import sys
 
-# Vector math utilities
-def normalize(v):
-    """Normalize a vector"""
-    norm = np.linalg.norm(v)
-    if norm == 0:
-        return v
-    return v / norm
+try:
+    import cupy as cp
+except ImportError:
+    print("ERROR: CuPy not installed!")
+    print("Install with: pip install cupy-cuda12x")
+    sys.exit(1)
 
-def reflect(direction, normal):
-    """Reflect a direction vector about a normal"""
-    return direction - 2 * np.dot(direction, normal) * normal
+# ============================================================================
+# CUDA Kernel (written in CUDA C, compiled by CuPy)
+# ============================================================================
 
-@dataclass
-class Ray:
-    """Ray with origin and direction"""
-    origin: np.ndarray
-    direction: np.ndarray
+RAYTRACING_KERNEL = r'''
+extern "C" __global__
+void raytrace_kernel(
+    const float* cam_pos,
+    const float* cam_forward,
+    const float* cam_right,
+    const float* cam_up,
+    float fov,
+    float aspect_ratio,
+    const float* spheres,
+    const float* sphere_colors,
+    const float* sphere_refl,
+    int num_spheres,
+    const float* planes,
+    const float* plane_normals,
+    const float* plane_colors,
+    const float* plane_refl,
+    int num_planes,
+    const float* light_dir,
+    const float* bg_color,
+    int max_depth,
+    int width,
+    int height,
+    float* output
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-@dataclass
-class Material:
-    """Material properties"""
-    color: np.ndarray
-    reflectivity: float = 0.0
-    emission: float = 0.0
+    if (x >= width || y >= height) return;
 
-@dataclass
-class Hit:
-    """Ray intersection result"""
-    distance: float
-    point: np.ndarray
-    normal: np.ndarray
-    material: Material
+    // Calculate ray direction
+    float u = (float)x / (float)width;
+    float v = (float)y / (float)height;
 
-class Sphere:
-    """Sphere object for raytracing"""
-    def __init__(self, center, radius, material):
-        self.center = np.array(center, dtype=float)
-        self.radius = radius
-        self.material = material
+    float fov_rad = fov * 3.14159265359f / 180.0f;
+    float half_height = tanf(fov_rad / 2.0f);
+    float half_width = aspect_ratio * half_height;
 
-    def intersect(self, ray: Ray) -> Optional[Hit]:
-        """Ray-sphere intersection"""
-        oc = ray.origin - self.center
-        a = np.dot(ray.direction, ray.direction)
-        b = 2.0 * np.dot(oc, ray.direction)
-        c = np.dot(oc, oc) - self.radius * self.radius
-        discriminant = b * b - 4 * a * c
+    float px = (u - 0.5f) * 2.0f * half_width;
+    float py = (0.5f - v) * 2.0f * half_height;
 
-        if discriminant < 0:
-            return None
+    // Ray direction
+    float dx = cam_forward[0] + px * cam_right[0] + py * cam_up[0];
+    float dy = cam_forward[1] + px * cam_right[1] + py * cam_up[1];
+    float dz = cam_forward[2] + px * cam_right[2] + py * cam_up[2];
 
-        t = (-b - np.sqrt(discriminant)) / (2.0 * a)
-        if t < 0.001:  # Avoid self-intersection
-            t = (-b + np.sqrt(discriminant)) / (2.0 * a)
-            if t < 0.001:
-                return None
+    // Normalize
+    float d_len = sqrtf(dx*dx + dy*dy + dz*dz);
+    dx /= d_len;
+    dy /= d_len;
+    dz /= d_len;
 
-        point = ray.origin + t * ray.direction
-        normal = normalize(point - self.center)
+    // Ray origin
+    float ox = cam_pos[0];
+    float oy = cam_pos[1];
+    float oz = cam_pos[2];
 
-        return Hit(t, point, normal, self.material)
+    // Accumulated color
+    float accum_r = 0.0f;
+    float accum_g = 0.0f;
+    float accum_b = 0.0f;
+    float reflectivity = 1.0f;
 
-class Plane:
-    """Plane object for raytracing"""
-    def __init__(self, point, normal, material):
-        self.point = np.array(point, dtype=float)
-        self.normal = normalize(np.array(normal, dtype=float))
-        self.material = material
+    // Raytracing loop
+    for (int depth = 0; depth < max_depth; depth++) {
+        float closest_t = 1e10f;
+        int hit_type = -1;
+        float hit_nx = 0.0f, hit_ny = 1.0f, hit_nz = 0.0f;
+        float hit_r = bg_color[0], hit_g = bg_color[1], hit_b = bg_color[2];
+        float hit_refl = 0.0f;
 
-    def intersect(self, ray: Ray) -> Optional[Hit]:
-        """Ray-plane intersection"""
-        denom = np.dot(self.normal, ray.direction)
-        if abs(denom) < 1e-6:
-            return None
+        // Check spheres
+        for (int i = 0; i < num_spheres; i++) {
+            float cx = spheres[i*4 + 0];
+            float cy = spheres[i*4 + 1];
+            float cz = spheres[i*4 + 2];
+            float radius = spheres[i*4 + 3];
 
-        t = np.dot(self.point - ray.origin, self.normal) / denom
-        if t < 0.001:
-            return None
+            // Ray-sphere intersection
+            float ocx = ox - cx;
+            float ocy = oy - cy;
+            float ocz = oz - cz;
 
-        point = ray.origin + t * ray.direction
-        return Hit(t, point, self.normal, self.material)
+            float a = dx*dx + dy*dy + dz*dz;
+            float b = 2.0f * (ocx*dx + ocy*dy + ocz*dz);
+            float c = ocx*ocx + ocy*ocy + ocz*ocz - radius*radius;
+
+            float discriminant = b*b - 4*a*c;
+
+            if (discriminant >= 0.0f) {
+                float sqrt_disc = sqrtf(discriminant);
+                float t = (-b - sqrt_disc) / (2.0f * a);
+
+                if (t < 0.001f) {
+                    t = (-b + sqrt_disc) / (2.0f * a);
+                }
+
+                if (t >= 0.001f && t < closest_t) {
+                    closest_t = t;
+                    hit_type = i;
+
+                    // Calculate normal
+                    float px = ox + t * dx;
+                    float py = oy + t * dy;
+                    float pz = oz + t * dz;
+
+                    float nx = px - cx;
+                    float ny = py - cy;
+                    float nz = pz - cz;
+
+                    float n_len = sqrtf(nx*nx + ny*ny + nz*nz);
+                    hit_nx = nx / n_len;
+                    hit_ny = ny / n_len;
+                    hit_nz = nz / n_len;
+
+                    hit_r = sphere_colors[i*3 + 0];
+                    hit_g = sphere_colors[i*3 + 1];
+                    hit_b = sphere_colors[i*3 + 2];
+                    hit_refl = sphere_refl[i];
+                }
+            }
+        }
+
+        // Check planes
+        for (int i = 0; i < num_planes; i++) {
+            float px = planes[i*3 + 0];
+            float py = planes[i*3 + 1];
+            float pz = planes[i*3 + 2];
+
+            float nx = plane_normals[i*3 + 0];
+            float ny = plane_normals[i*3 + 1];
+            float nz = plane_normals[i*3 + 2];
+
+            // Ray-plane intersection
+            float denom = nx*dx + ny*dy + nz*dz;
+
+            if (fabsf(denom) > 1e-6f) {
+                float t = ((px - ox)*nx + (py - oy)*ny + (pz - oz)*nz) / denom;
+
+                if (t >= 0.001f && t < closest_t) {
+                    closest_t = t;
+                    hit_type = 100 + i;
+
+                    hit_nx = nx;
+                    hit_ny = ny;
+                    hit_nz = nz;
+
+                    hit_r = plane_colors[i*3 + 0];
+                    hit_g = plane_colors[i*3 + 1];
+                    hit_b = plane_colors[i*3 + 2];
+                    hit_refl = plane_refl[i];
+                }
+            }
+        }
+
+        // No hit - add background and exit
+        if (hit_type == -1) {
+            accum_r += reflectivity * bg_color[0];
+            accum_g += reflectivity * bg_color[1];
+            accum_b += reflectivity * bg_color[2];
+            break;
+        }
+
+        // Calculate hit point
+        float hit_px = ox + closest_t * dx;
+        float hit_py = oy + closest_t * dy;
+        float hit_pz = oz + closest_t * dz;
+
+        // Lighting
+        float lit_r, lit_g, lit_b;
+
+        // Check if emissive (color > 1.0)
+        if (hit_r > 1.0f || hit_g > 1.0f || hit_b > 1.0f) {
+            // Emissive object - no lighting needed
+            lit_r = hit_r;
+            lit_g = hit_g;
+            lit_b = hit_b;
+        } else {
+            // Normal lighting
+            float diffuse = fmaxf(0.0f, hit_nx * light_dir[0] +
+                                         hit_ny * light_dir[1] +
+                                         hit_nz * light_dir[2]);
+            float ambient = 0.3f;
+            float lighting = ambient + (1.0f - ambient) * diffuse;
+
+            lit_r = hit_r * lighting;
+            lit_g = hit_g * lighting;
+            lit_b = hit_b * lighting;
+        }
+
+        float contribution = reflectivity * (1.0f - hit_refl);
+        accum_r += contribution * lit_r;
+        accum_g += contribution * lit_g;
+        accum_b += contribution * lit_b;
+
+        // Setup next bounce
+        if (hit_refl > 0.01f) {
+            reflectivity *= hit_refl;
+
+            // Offset origin
+            ox = hit_px + hit_nx * 0.001f;
+            oy = hit_py + hit_ny * 0.001f;
+            oz = hit_pz + hit_nz * 0.001f;
+
+            // Reflect direction
+            float dot = 2.0f * (dx * hit_nx + dy * hit_ny + dz * hit_nz);
+            dx = dx - dot * hit_nx;
+            dy = dy - dot * hit_ny;
+            dz = dz - dot * hit_nz;
+        } else {
+            break;
+        }
+    }
+
+    // Clamp color (allow > 1.0 for bloom/HDR effect)
+    accum_r = fminf(3.0f, fmaxf(0.0f, accum_r));
+    accum_g = fminf(3.0f, fmaxf(0.0f, accum_g));
+    accum_b = fminf(3.0f, fmaxf(0.0f, accum_b));
+
+    // Simple tone mapping for HDR
+    accum_r = accum_r / (1.0f + accum_r);
+    accum_g = accum_g / (1.0f + accum_g);
+    accum_b = accum_b / (1.0f + accum_b);
+
+    // Write output
+    int idx = y * width + x;
+    output[idx * 3 + 0] = accum_r;
+    output[idx * 3 + 1] = accum_g;
+    output[idx * 3 + 2] = accum_b;
+}
+'''
+
+# ============================================================================
+# Camera Class
+# ============================================================================
 
 class Camera:
     """Camera with position and orientation"""
     def __init__(self, position, look_at, fov=60):
-        self.position = np.array(position, dtype=float)
-        self.look_at = np.array(look_at, dtype=float)
+        self.position = np.array(position, dtype=np.float32)
+        self.look_at = np.array(look_at, dtype=np.float32)
         self.fov = fov
-        self.up = np.array([0, 1, 0], dtype=float)
+        self.up = np.array([0, 1, 0], dtype=np.float32)
         self.yaw = 0.0
         self.pitch = 0.0
         self.update_vectors()
 
+    def normalize(self, v):
+        norm = np.linalg.norm(v)
+        return v / norm if norm > 0 else v
+
     def update_vectors(self):
-        """Update camera direction vectors"""
-        self.forward = normalize(self.look_at - self.position)
-        self.right = normalize(np.cross(self.forward, self.up))
-        self.camera_up = normalize(np.cross(self.right, self.forward))
-
-    def get_ray(self, u, v, aspect_ratio):
-        """Get ray for pixel coordinates (u, v in [0,1])"""
-        fov_rad = np.radians(self.fov)
-        half_height = np.tan(fov_rad / 2)
-        half_width = aspect_ratio * half_height
-
-        # Convert from [0,1] to [-1,1]
-        x = (u - 0.5) * 2 * half_width
-        y = (0.5 - v) * 2 * half_height
-
-        direction = normalize(
-            self.forward +
-            x * self.right +
-            y * self.camera_up
-        )
-
-        return Ray(self.position.copy(), direction)
+        """Update camera vectors"""
+        self.forward = self.normalize(self.look_at - self.position)
+        self.right = self.normalize(np.cross(self.forward, self.up))
+        self.camera_up = self.normalize(np.cross(self.right, self.forward))
 
     def move(self, direction, speed):
-        """Move camera in a direction"""
+        """Move camera"""
         self.position += direction * speed
         self.look_at += direction * speed
         self.update_vectors()
@@ -142,7 +288,6 @@ class Camera:
         self.yaw += dyaw
         self.pitch = np.clip(self.pitch + dpitch, -89, 89)
 
-        # Update look_at based on yaw and pitch
         yaw_rad = np.radians(self.yaw)
         pitch_rad = np.radians(self.pitch)
 
@@ -150,167 +295,179 @@ class Camera:
             np.cos(pitch_rad) * np.cos(yaw_rad),
             np.sin(pitch_rad),
             np.cos(pitch_rad) * np.sin(yaw_rad)
-        ])
+        ], dtype=np.float32)
 
         self.look_at = self.position + forward
         self.update_vectors()
 
-class RaytracingScene:
-    """Scene containing objects for raytracing"""
-    def __init__(self):
-        self.objects = []
-        self.max_bounces = 3
-        self.background_color = np.array([0.1, 0.1, 0.15])
-        self.setup_scene()
+# ============================================================================
+# Scene Setup
+# ============================================================================
 
-    def setup_scene(self):
-        """Setup the scene with colorful sphere and mirrors"""
-        # Colorful sphere in center with gradient effect
-        # We'll create multiple small spheres to make it colorful
-        center_sphere = Sphere(
-            center=[0, 0, 0],
-            radius=1.5,
-            material=Material(
-                color=np.array([1.0, 0.3, 0.3]),  # Red
-                reflectivity=0.3
-            )
-        )
-        self.objects.append(center_sphere)
+def setup_scene():
+    """Setup scene geometry - returns base scene (will be animated)"""
+    # Initial sphere positions (will be updated each frame)
+    spheres = []
+    sphere_colors = []
+    sphere_refl = []
 
-        # Add smaller colorful spheres around the center
-        colors = [
-            np.array([1.0, 0.5, 0.0]),  # Orange
-            np.array([1.0, 1.0, 0.0]),  # Yellow
-            np.array([0.0, 1.0, 0.5]),  # Cyan
-            np.array([0.3, 0.3, 1.0]),  # Blue
-            np.array([1.0, 0.0, 1.0]),  # Magenta
-        ]
+    # Center emissive sphere (glowing)
+    spheres.append([0.0, 0.5, -2.0, 0.8])
+    sphere_colors.append([10.0, 5.0, 2.0])  # Bright emission!
+    sphere_refl.append(0.1)
 
-        for i, color in enumerate(colors):
-            angle = (i / len(colors)) * 2 * np.pi
-            x = np.cos(angle) * 1.2
-            z = np.sin(angle) * 1.2
-            sphere = Sphere(
-                center=[x, 0, z],
-                radius=0.5,
-                material=Material(color=color, reflectivity=0.2)
-            )
-            self.objects.append(sphere)
+    # Orbiting colorful spheres
+    colors = [
+        [1.0, 0.1, 0.1],  # Red
+        [0.1, 1.0, 0.1],  # Green
+        [0.1, 0.1, 1.0],  # Blue
+        [1.0, 1.0, 0.1],  # Yellow
+        [1.0, 0.1, 1.0],  # Magenta
+        [0.1, 1.0, 1.0],  # Cyan
+    ]
 
-        # Left diagonal mirror (plane)
-        left_mirror = Plane(
-            point=[-5, 0, 0],
-            normal=[1, 0, 1],  # Diagonal facing
-            material=Material(
-                color=np.array([0.9, 0.9, 0.95]),
-                reflectivity=0.95
-            )
-        )
-        self.objects.append(left_mirror)
+    for i, color in enumerate(colors):
+        angle = (i / len(colors)) * 2 * np.pi
+        x = np.cos(angle) * 2.5
+        z = np.sin(angle) * 2.5 - 2.0
+        spheres.append([x, 0.3, z, 0.4])
+        sphere_colors.append(color)
+        sphere_refl.append(0.7)  # Shiny!
 
-        # Right diagonal mirror (plane)
-        right_mirror = Plane(
-            point=[5, 0, 0],
-            normal=[-1, 0, 1],  # Diagonal facing
-            material=Material(
-                color=np.array([0.95, 0.9, 0.9]),
-                reflectivity=0.95
-            )
-        )
-        self.objects.append(right_mirror)
+    # Glass-like sphere
+    spheres.append([0.0, 0.3, -4.5, 0.6])
+    sphere_colors.append([0.9, 0.9, 1.0])
+    sphere_refl.append(0.95)  # Very reflective
 
-        # Floor (ground plane)
-        floor = Plane(
-            point=[0, -2, 0],
-            normal=[0, 1, 0],
-            material=Material(
-                color=np.array([0.3, 0.3, 0.3]),
-                reflectivity=0.1
-            )
-        )
-        self.objects.append(floor)
+    # Planes
+    planes = [
+        [-4.0, 0.0, -2.0],  # Left mirror
+        [4.0, 0.0, -2.0],   # Right mirror
+        [0.0, -0.5, 0.0],   # Floor (water-like)
+    ]
 
-    def intersect(self, ray: Ray) -> Optional[Hit]:
-        """Find closest intersection with scene"""
-        closest_hit = None
-        closest_distance = float('inf')
+    plane_normals = [
+        [0.7071, 0.0, 0.7071],   # Left diagonal
+        [-0.7071, 0.0, 0.7071],  # Right diagonal
+        [0.0, 1.0, 0.0],         # Up
+    ]
 
-        for obj in self.objects:
-            hit = obj.intersect(ray)
-            if hit and hit.distance < closest_distance:
-                closest_hit = hit
-                closest_distance = hit.distance
+    plane_colors = [
+        [0.95, 0.9, 0.95],  # Left mirror (slightly pink)
+        [0.9, 0.95, 0.95],  # Right mirror (slightly cyan)
+        [0.1, 0.1, 0.15],   # Floor (dark, water-like)
+    ]
 
-        return closest_hit
+    plane_refl = [0.98, 0.98, 0.85]  # Mirrors + water-like floor
 
-    def trace_ray(self, ray: Ray, depth=0) -> np.ndarray:
-        """Trace a ray and return color"""
-        if depth >= self.max_bounces:
-            return self.background_color
+    return (
+        np.array(spheres, dtype=np.float32).flatten(),
+        np.array(sphere_colors, dtype=np.float32).flatten(),
+        np.array(sphere_refl, dtype=np.float32),
+        len(spheres),
+        np.array(planes, dtype=np.float32).flatten(),
+        np.array(plane_normals, dtype=np.float32).flatten(),
+        np.array(plane_colors, dtype=np.float32).flatten(),
+        np.array(plane_refl, dtype=np.float32),
+        len(planes)
+    )
 
-        hit = self.intersect(ray)
-        if not hit:
-            return self.background_color
+# ============================================================================
+# Main Application
+# ============================================================================
 
-        # Base color
-        color = hit.material.color.copy()
-
-        # Add emission
-        color += hit.material.emission
-
-        # Add reflections
-        if hit.material.reflectivity > 0:
-            reflected_dir = reflect(ray.direction, hit.normal)
-            reflected_ray = Ray(hit.point + hit.normal * 0.001, reflected_dir)
-            reflected_color = self.trace_ray(reflected_ray, depth + 1)
-            color = (1 - hit.material.reflectivity) * color + \
-                    hit.material.reflectivity * reflected_color
-
-        # Simple lighting (ambient + diffuse from above)
-        light_dir = normalize(np.array([0.3, 1.0, 0.3]))
-        diffuse = max(0, np.dot(hit.normal, light_dir))
-        ambient = 0.3
-        lighting = ambient + (1 - ambient) * diffuse
-
-        color *= lighting
-
-        return np.clip(color, 0, 1)
-
-class RaytracingApp:
-    """Main application with pygame GUI"""
+class CuPyRaytracingApp:
+    """CuPy GPU raytracing application"""
     def __init__(self, width=800, height=600):
+        print("Initializing CuPy GPU raytracer...")
+
+        # Test CuPy
+        try:
+            test = cp.array([1, 2, 3])
+            device_id = cp.cuda.Device().id
+            props = cp.cuda.runtime.getDeviceProperties(device_id)
+            device_name = props['name'].decode('utf-8')
+            print(f"✓ CuPy GPU available: {device_name}")
+        except Exception as e:
+            print(f"ERROR: CuPy GPU test failed: {e}")
+            sys.exit(1)
+
         pygame.init()
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("Raytracing Simulation - WASD to move, Mouse to look")
+        pygame.display.set_caption("CuPy GPU Raytracing - RTX 4090")
         self.clock = pygame.time.Clock()
 
-        # Scene and camera
-        self.scene = RaytracingScene()
-        self.camera = Camera(
-            position=[0, 2, 8],
-            look_at=[0, 0, 0]
+        # Camera - positioned to see reflections clearly
+        self.camera = Camera([0, 1.5, 2.0], [0, 0.5, -2.0])
+
+        # Animation time
+        self.time = 0.0
+
+        # Scene
+        print("Setting up scene...")
+        (spheres, sphere_colors, sphere_refl, num_spheres,
+         planes, plane_normals, plane_colors, plane_refl, num_planes) = setup_scene()
+
+        # Save base scene for animation
+        self.base_spheres = spheres.copy()
+        self.num_spheres = num_spheres
+
+        # Upload to GPU
+        self.d_spheres = cp.asarray(spheres)
+        self.d_sphere_colors = cp.asarray(sphere_colors)
+        self.d_sphere_refl = cp.asarray(sphere_refl)
+
+        self.d_planes = cp.asarray(planes)
+        self.d_plane_normals = cp.asarray(plane_normals)
+        self.d_plane_colors = cp.asarray(plane_colors)
+        self.d_plane_refl = cp.asarray(plane_refl)
+        self.num_planes = num_planes
+
+        # Light and background
+        light_dir = np.array([0.3, 1.0, 0.3], dtype=np.float32)
+        light_dir /= np.linalg.norm(light_dir)
+        self.d_light_dir = cp.asarray(light_dir)
+
+        bg_color = np.array([0.1, 0.1, 0.15], dtype=np.float32)
+        self.d_bg_color = cp.asarray(bg_color)
+
+        # Settings
+        self.max_depth = 3
+
+        # Output buffer
+        self.d_output = cp.zeros((height * width * 3,), dtype=cp.float32)
+
+        # Compile kernel
+        print("Compiling CUDA kernel...")
+        self.kernel = cp.RawKernel(RAYTRACING_KERNEL, 'raytrace_kernel')
+
+        # CUDA grid
+        self.block = (16, 16, 1)
+        self.grid = (
+            (width + self.block[0] - 1) // self.block[0],
+            (height + self.block[1] - 1) // self.block[1],
+            1
         )
 
-        # Rendering settings
-        self.scale = 2  # Render at lower resolution for speed
-        self.render_width = width // self.scale
-        self.render_height = height // self.scale
+        print(f"CUDA Grid: {self.grid} blocks x {self.block} threads")
 
-        # Mouse control
+        # Controls
         self.mouse_sensitivity = 0.2
+        self.move_speed = 0.15
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)
-
-        # Movement speed
-        self.move_speed = 0.1
 
         self.running = True
         self.need_render = True
 
+        # Warmup
+        print("Warming up GPU...")
+        self.render()
+        print("Ready!")
+
     def handle_events(self):
-        """Handle pygame events"""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -323,7 +480,6 @@ class RaytracingApp:
                 self.need_render = True
 
     def handle_movement(self):
-        """Handle continuous key presses for movement"""
         keys = pygame.key.get_pressed()
         moved = False
 
@@ -340,82 +496,132 @@ class RaytracingApp:
             self.camera.move(self.camera.right, self.move_speed)
             moved = True
         if keys[pygame.K_SPACE]:
-            self.camera.move(np.array([0, 1, 0]), self.move_speed)
+            self.camera.move(np.array([0, 1, 0], dtype=np.float32), self.move_speed)
             moved = True
         if keys[pygame.K_LSHIFT]:
-            self.camera.move(np.array([0, -1, 0]), self.move_speed)
+            self.camera.move(np.array([0, -1, 0], dtype=np.float32), self.move_speed)
             moved = True
 
         if moved:
             self.need_render = True
 
+    def update_scene(self):
+        """Update scene animation"""
+        # Update spheres based on time
+        spheres = self.base_spheres.copy()
+
+        # Animate orbiting spheres (indices 1-6)
+        for i in range(1, 7):
+            idx = i * 4
+            angle_offset = (i - 1) / 6.0 * 2 * np.pi
+            angle = self.time * 0.5 + angle_offset
+
+            # Orbit motion
+            radius = 2.5
+            x = np.cos(angle) * radius
+            z = np.sin(angle) * radius - 2.0
+
+            # Bobbing motion
+            y = 0.3 + np.sin(self.time * 2.0 + angle_offset) * 0.2
+
+            spheres[idx] = x
+            spheres[idx + 1] = y
+            spheres[idx + 2] = z
+
+        # Animate center emissive sphere (index 0)
+        spheres[1] = 0.5 + np.sin(self.time * 1.5) * 0.3  # Y bobbing
+
+        # Upload updated spheres to GPU
+        self.d_spheres = cp.asarray(spheres)
+
+        # Increment time
+        self.time += 0.016  # ~60 FPS
+
     def render(self):
-        """Render the scene using raytracing"""
-        aspect_ratio = self.render_width / self.render_height
-        pixels = np.zeros((self.render_height, self.render_width, 3))
+        """Render using CuPy"""
+        aspect_ratio = self.width / self.height
 
-        # Render each pixel
-        for y in range(self.render_height):
-            for x in range(self.render_width):
-                u = x / self.render_width
-                v = y / self.render_height
+        # Upload camera to GPU
+        d_cam_pos = cp.asarray(self.camera.position)
+        d_cam_forward = cp.asarray(self.camera.forward)
+        d_cam_right = cp.asarray(self.camera.right)
+        d_cam_up = cp.asarray(self.camera.camera_up)
 
-                ray = self.camera.get_ray(u, v, aspect_ratio)
-                color = self.scene.trace_ray(ray)
-                pixels[y, x] = color
-
-        # Convert to pygame surface
-        pixels_8bit = (pixels * 255).astype(np.uint8)
-        surface = pygame.surfarray.make_surface(
-            np.transpose(pixels_8bit, (1, 0, 2))
+        # Launch kernel
+        self.kernel(
+            self.grid, self.block,
+            (d_cam_pos, d_cam_forward, d_cam_right, d_cam_up,
+             np.float32(self.camera.fov), np.float32(aspect_ratio),
+             self.d_spheres, self.d_sphere_colors, self.d_sphere_refl,
+             np.int32(self.num_spheres),
+             self.d_planes, self.d_plane_normals, self.d_plane_colors, self.d_plane_refl,
+             np.int32(self.num_planes),
+             self.d_light_dir, self.d_bg_color,
+             np.int32(self.max_depth),
+             np.int32(self.width), np.int32(self.height),
+             self.d_output)
         )
 
-        # Scale up to screen size
-        scaled_surface = pygame.transform.scale(surface, (self.width, self.height))
-        self.screen.blit(scaled_surface, (0, 0))
+        # Copy back
+        output = cp.asnumpy(self.d_output).reshape((self.height, self.width, 3))
 
-        # Draw instructions
+        # Display
+        pixels_8bit = (output * 255).astype(np.uint8)
+        surface = pygame.surfarray.make_surface(np.transpose(pixels_8bit, (1, 0, 2)))
+        self.screen.blit(surface, (0, 0))
+
+        # UI
         font = pygame.font.Font(None, 24)
-        instructions = [
-            "WASD: Move camera",
-            "Mouse: Look around",
-            "Space/Shift: Up/Down",
-            "ESC: Quit"
+        fps = self.clock.get_fps()
+        texts = [
+            f"FPS: {fps:.1f}",
+            "CuPy GPU Raytracing - RTX 4090",
+            "",
+            "Watch the reflections!",
+            "- Glowing sphere in center",
+            "- Mirrors on left/right",
+            "- Water-like floor",
+            "",
+            "WASD: Move | Mouse: Look | ESC: Quit"
         ]
 
         y_offset = 10
-        for instruction in instructions:
-            text = font.render(instruction, True, (255, 255, 255))
-            self.screen.blit(text, (10, y_offset))
+        for text in texts:
+            rendered = font.render(text, True, (0, 255, 0))
+            self.screen.blit(rendered, (10, y_offset))
             y_offset += 25
 
         pygame.display.flip()
         self.need_render = False
 
     def run(self):
-        """Main application loop"""
-        print("Starting Raytracing Simulation...")
-        print("Controls:")
-        print("  WASD - Move camera")
-        print("  Mouse - Look around")
-        print("  Space/Shift - Move up/down")
-        print("  ESC - Quit")
+        print("\nControls:")
+        print("  WASD - Move")
+        print("  Mouse - Look")
+        print("  Space/Shift - Up/Down")
+        print("  ESC - Quit\n")
 
         while self.running:
             self.handle_events()
             self.handle_movement()
 
-            if self.need_render:
-                self.render()
+            # Always update scene for animation
+            self.update_scene()
 
-            self.clock.tick(30)  # 30 FPS
+            # Always render (animated scene)
+            self.render()
+
+            self.clock.tick(60)
 
         pygame.quit()
         sys.exit()
 
 def main():
-    """Entry point"""
-    app = RaytracingApp(width=800, height=600)
+    print("=" * 60)
+    print("CuPy GPU Raytracing - RTX 4090 Accelerated")
+    print("=" * 60)
+
+    app = CuPyRaytracingApp(width=800, height=600)
     app.run()
 
 if __name__ == "__main__":
